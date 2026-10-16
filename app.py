@@ -3,17 +3,8 @@ import csv
 import io
 import html
 
-from utils.analyzer import (
-    analyze_text,
-    analyze_url,
-    analyze_phone
-)
-
-from utils.database.db import (
-    save_scan,
-    get_scan_history
-)
-
+from utils.analyzer import analyze_text, analyze_url, analyze_phone
+from utils.database.db import save_scan, get_scan_history
 from utils.ocr import extract_text_from_image
 from utils.ai import generate_ai_explanation
 
@@ -28,6 +19,9 @@ st.set_page_config(
     layout="wide"
 )
 
+if "latest_analysis" not in st.session_state:
+    st.session_state.latest_analysis = None
+
 
 # =========================================================
 # CUSTOM CSS
@@ -35,128 +29,108 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-
 .stApp {
     background-color: #87CEEB;
 }
-
 h1, h2, h3, h4, p, label, span {
     color: black !important;
 }
-
-.stTextArea textarea,
-.stTextInput input {
+.stTextArea textarea, .stTextInput input {
     background-color: white !important;
     color: black !important;
     border: 2px solid black !important;
-    border: 2px solid black !important;
     border-radius: 10px;
 }
-
-.stButton button {
+.stButton button, .stDownloadButton button {
     background-color: white !important;
     color: black !important;
     border: 2px solid black !important;
     border-radius: 10px;
     font-weight: bold;
 }
-
-.result-box {
-    background-color: white;
+.result-box, .ai-box, .warning-box, .safe-box, .info-box {
     color: black;
     border: 2px solid black;
     border-radius: 12px;
-    padding: 20px;
+    padding: 18px;
     margin-top: 10px;
+    overflow-wrap: anywhere;
 }
-
-.ai-box {
+.result-box, .ai-box, .info-box {
     background-color: white;
-    color: black;
-    border: 2px solid black;
-    border-radius: 12px;
-    padding: 20px;
-    margin-top: 10px;
+}
+.ai-box {
     font-size: 16px;
     line-height: 1.6;
 }
-
 .warning-box {
     background-color: #fff3cd;
-    color: black;
-    border: 2px solid #856404;
-    border-radius: 12px;
-    padding: 18px;
-    margin-top: 10px;
+    border-color: #856404;
 }
-
 .safe-box {
     background-color: #e8f5e9;
-    color: black;
-    border: 2px solid #2e7d32;
-    border-radius: 12px;
-    padding: 18px;
-    margin-top: 10px;
+    border-color: #2e7d32;
 }
-
-.info-box {
-    background-color: white;
-    color: black;
-    border: 2px solid black;
-    border-radius: 12px;
-    padding: 18px;
-    margin-top: 10px;
-}
-
 </style>
 """, unsafe_allow_html=True)
 
 
 # =========================================================
-# TITLE
+# PAGE TITLE
 # =========================================================
 
 st.title("🔍 FraudLens")
-
 st.subheader("Scam & Phishing Risk Analyzer")
-
 st.write(
     "Analyze suspicious messages, URLs, phone numbers, emails and screenshots."
 )
 
 
 # =========================================================
-# SELECTOR
+# HELPER FUNCTIONS
 # =========================================================
 
-option = st.selectbox(
-    "Select what you want to analyze:",
-    [
-        "📩 Message",
-        "🌐 URL",
-        "📱 Phone Number",
-        "📧 Email",
-        "📸 Screenshot",
-        "📊 Dashboard"
-    ]
-)
+def store_analysis(scan_type, input_data, result):
+    """Keep the latest result across Streamlit reruns."""
+
+    st.session_state.latest_analysis = {
+        "scan_type": scan_type,
+        "input_data": input_data,
+        "result": result,
+        "ai_text": "",
+        "ai_generated": False
+    }
+
+    try:
+        save_scan(
+            scan_type,
+            input_data,
+            result["risk"],
+            result["score"]
+        )
+    except Exception as error:
+        st.warning(
+            f"Analysis completed, but saving to database failed: {error}"
+        )
 
 
-# =========================================================
-# RESULT DISPLAY
-# =========================================================
+def get_categories(result):
+    return result.get(
+        "categories",
+        [result.get("category", "General")]
+    )
+
 
 def show_result(result):
-
-    risk = result["risk"]
-    score = result["score"]
+    risk = result.get("risk", "UNKNOWN")
+    score = result.get("score", 0)
 
     st.subheader("🛡️ Risk Assessment")
 
     st.markdown(
         f"""
         <div class="result-box">
-            <h3>Risk Level: {risk}</h3>
+            <h3>Risk Level: {html.escape(str(risk))}</h3>
             <h3>Risk Score: {score}/100</h3>
         </div>
         """,
@@ -164,188 +138,78 @@ def show_result(result):
     )
 
     st.progress(
-        min(score, 100) / 100,
+        max(0, min(score, 100)) / 100,
         text=f"Risk Score: {score}/100"
     )
 
 
-# =========================================================
-# WARNING SIGNS
-# =========================================================
-
-def show_warning_signs(result, text=""):
-
+def show_warning_signs(result):
     st.subheader("🚨 Warning Signs")
 
-    warnings = []
-
-    categories = result.get(
-        "categories",
-        [result.get("category", "General")]
-    )
-
     keywords = result.get("keywords", [])
+    categories = get_categories(result)
 
     if keywords:
-        warnings.append(
-            "Suspicious keywords detected: "
-            + ", ".join(keywords)
-        )
-
-    if categories:
-        warnings.append(
-            "Possible scam category: "
-            + ", ".join(categories)
-        )
-
-    if result["score"] >= 50:
-        warnings.append(
-            "The overall risk score is high."
-        )
-
-    elif result["score"] >= 20:
-        warnings.append(
-            "The content contains some suspicious patterns."
-        )
-
-    else:
-        warnings.append(
-            "Only limited suspicious patterns were detected."
-        )
-
-    for warning in warnings:
-
         st.markdown(
-            f"""
-            <div class="warning-box">
-            ⚠️ {html.escape(warning)}
-            </div>
-            """,
+            '<div class="warning-box">⚠️ Suspicious keywords: '
+            + html.escape(", ".join(keywords))
+            + "</div>",
             unsafe_allow_html=True
         )
 
-
-# =========================================================
-# SAFETY RECOMMENDATIONS
-# =========================================================
-
-def show_safety_advice(result):
-
-    st.subheader("🛡️ Safety Recommendations")
-
-    advice = [
-        "Do not share OTPs, passwords, PINs or CVV numbers.",
-        "Avoid clicking unknown or suspicious links.",
-        "Verify the sender through an official source.",
-        "Do not make payments based only on an unexpected message.",
-        "When in doubt, contact the organization using its official website or app."
-    ]
-
-    if result["risk"] == "HIGH":
-
-        advice.insert(
-            0,
-            "🚨 Treat this content as high risk and avoid interacting with it."
+    if categories:
+        st.markdown(
+            '<div class="warning-box">🏷️ Possible categories: '
+            + html.escape(", ".join(categories))
+            + "</div>",
+            unsafe_allow_html=True
         )
 
-    elif result["risk"] == "MEDIUM":
+    score = result.get("score", 0)
 
-        advice.insert(
-            0,
-            "⚠️ Be cautious and verify the information before taking action."
-        )
-
+    if score >= 50:
+        message = "The content has a high pattern-based risk score."
+    elif score >= 20:
+        message = "Some suspicious patterns were detected."
     else:
-
-        advice.insert(
-            0,
-            "ℹ️ No major suspicious pattern was detected, but always remain cautious."
-        )
+        message = "Few suspicious patterns were detected."
 
     st.markdown(
-        '<div class="safe-box">',
+        f'<div class="warning-box">⚠️ {message}</div>',
         unsafe_allow_html=True
     )
+
+
+def show_safety_advice(result):
+    st.subheader("🛡️ Safety Recommendations")
+
+    if result.get("risk") == "HIGH":
+        st.warning("Treat this result cautiously. Avoid interacting with the content.")
+    elif result.get("risk") == "MEDIUM":
+        st.warning("Verify the information before taking action.")
+    else:
+        st.info("A low score does not guarantee that the content is safe.")
+
+    advice = [
+        "Never share OTPs, passwords, PINs or CVV numbers.",
+        "Avoid clicking unexpected or suspicious links.",
+        "Verify the sender using an official source.",
+        "Do not make payments based only on an unexpected message.",
+        "Contact the organization using its official website or app."
+    ]
 
     for item in advice:
         st.write("•", item)
 
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True
-    )
 
+def create_report(scan_type, input_data, result, ai_text):
+    categories = get_categories(result)
+    keywords = result.get("keywords", [])
 
-# =========================================================
-# AI EXPLANATION
-# =========================================================
-
-def show_ai(text, result):
-
-    st.subheader("🤖 AI Explanation")
-
-    try:
-
-        explanation = generate_ai_explanation(
-            text,
-            result["risk"],
-            result["score"],
-            result.get(
-                "categories",
-                [result.get("category", "General")]
-            ),
-            result.get("keywords", [])
-        )
-
-        if explanation and explanation.strip():
-
-            safe_explanation = html.escape(
-                explanation
-            ).replace("\n", "<br>")
-
-            st.markdown(
-                f"""
-                <div class="ai-box">
-                {safe_explanation}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        else:
-
-            st.warning(
-                "No AI explanation was generated."
-            )
-
-    except Exception as e:
-
-        st.error(
-            "AI explanation could not be generated. "
-            "Make sure Ollama is running."
-        )
-
-
-# =========================================================
-# DOWNLOAD REPORT
-# =========================================================
-
-def download_report(scan_type, input_data, result, ai_text=""):
-
-    categories = result.get(
-        "categories",
-        [result.get("category", "General")]
-    )
-
-    keywords = result.get(
-        "keywords",
-        []
-    )
-
-    report = f"""
+    return f"""
 ========================================
              FRAUDLENS 🔍
-       SCAM ANALYSIS REPORT
+          SCAM ANALYSIS REPORT
 ========================================
 
 Scan Type:
@@ -358,11 +222,8 @@ Input:
 RISK ASSESSMENT
 ----------------------------------------
 
-Risk Level:
-{result["risk"]}
-
-Risk Score:
-{result["score"]}/100
+Risk Level: {result.get("risk", "UNKNOWN")}
+Risk Score: {result.get("score", 0)}/100
 
 ----------------------------------------
 SCAM CATEGORIES
@@ -386,98 +247,138 @@ ANALYSIS
 AI EXPLANATION
 ----------------------------------------
 
-{ai_text if ai_text else "AI explanation generated inside the application."}
+{ai_text or "AI explanation is unavailable."}
 
 ----------------------------------------
 SAFETY NOTICE
 ----------------------------------------
 
-FraudLens provides an automated risk assessment.
-It does not guarantee that a message, URL or phone number
-is definitely fraudulent.
-
-Always verify suspicious information through official sources.
+FraudLens provides an automated, pattern-based risk assessment.
+It cannot guarantee that content is definitely fraudulent or safe.
+Verify suspicious information through official sources.
 
 ========================================
 """
+
+
+def show_ai_and_report(analysis):
+    result = analysis["result"]
+
+    st.subheader("🤖 AI Explanation")
+
+    if not analysis["ai_generated"]:
+        with st.spinner("Generating AI explanation using Gemma3..."):
+            try:
+                explanation = generate_ai_explanation(
+                    analysis["input_data"],
+                    result.get("risk", "UNKNOWN"),
+                    result.get("score", 0),
+                    get_categories(result),
+                    result.get("keywords", [])
+                )
+
+                analysis["ai_text"] = (
+                    str(explanation).strip()
+                    if explanation
+                    else "No AI explanation was generated."
+                )
+
+            except Exception as error:
+                analysis["ai_text"] = (
+                    f"AI explanation could not be generated. "
+                    f"Error: {type(error).__name__}: {error}"
+                )
+
+            analysis["ai_generated"] = True
+            st.session_state.latest_analysis = analysis
+
+    st.markdown(
+        '<div class="ai-box">'
+        + html.escape(analysis["ai_text"]).replace("\n", "<br>")
+        + "</div>",
+        unsafe_allow_html=True
+    )
+
+    st.divider()
+    st.subheader("📥 Download Scan Report")
+
+    report = create_report(
+        analysis["scan_type"],
+        analysis["input_data"],
+        result,
+        analysis["ai_text"]
+    )
 
     st.download_button(
         label="📥 Download Scan Report",
         data=report,
         file_name="FraudLens_Scan_Report.txt",
-        mime="text/plain"
+        mime="text/plain",
+        key="download_latest_report"
     )
 
 
-# =========================================================
-# COMPLETE ANALYSIS DISPLAY
-# =========================================================
+def show_latest_analysis():
+    analysis = st.session_state.latest_analysis
 
-def complete_analysis(
-    scan_type,
-    input_data,
-    result
-):
+    if not analysis:
+        return
 
-    show_result(result)
+    st.divider()
+    st.header("📋 Latest Analysis")
 
-    categories = result.get(
-        "categories",
-        [result.get("category", "General")]
-    )
+    st.caption(f"Analysis type: {analysis['scan_type']}")
 
-    keywords = result.get(
-        "keywords",
-        []
-    )
+    show_result(analysis["result"])
 
-    if categories:
+    categories = get_categories(analysis["result"])
+    keywords = analysis["result"].get("keywords", [])
 
-        st.subheader("🏷️ Scam Categories")
-
-        for category in categories:
-            st.write("•", category)
+    st.subheader("🏷️ Scam Categories")
+    for category in categories:
+        st.write("•", category)
 
     if keywords:
-
         st.subheader("🔑 Detected Keywords")
-
         for keyword in keywords:
             st.write("•", keyword)
 
-    if result.get("reason"):
-
+    reason = analysis["result"].get("reason")
+    if reason:
         st.subheader("🔎 Analysis")
+        st.write(reason)
 
-        st.write(
-            result["reason"]
+    if analysis["scan_type"] == "Screenshot":
+        st.subheader("📝 OCR Extracted Text")
+        st.text_area(
+            "Extracted screenshot content",
+            value=analysis["input_data"],
+            height=150,
+            disabled=True,
+            key="latest_ocr_text"
         )
 
-    show_warning_signs(
-        result,
-        input_data
-    )
-
-    show_safety_advice(
-        result
-    )
-
+    show_warning_signs(analysis["result"])
+    show_safety_advice(analysis["result"])
     st.divider()
+    show_ai_and_report(analysis)
 
-    show_ai(
-        input_data,
-        result
-    )
 
-    st.divider()
+# =========================================================
+# ANALYSIS SELECTOR
+# =========================================================
 
-    st.subheader("📥 Report")
-
-    download_report(
-        scan_type,
-        input_data,
-        result
-    )
+option = st.selectbox(
+    "Select what you want to analyze:",
+    [
+        "📩 Message",
+        "🌐 URL",
+        "📱 Phone Number",
+        "📧 Email",
+        "📸 Screenshot",
+        "📊 Dashboard"
+    ]
+)
 
 
 # =========================================================
@@ -485,7 +386,6 @@ def complete_analysis(
 # =========================================================
 
 if option == "📩 Message":
-
     st.header("📩 Message Analyzer")
 
     message = st.text_area(
@@ -494,35 +394,12 @@ if option == "📩 Message":
         placeholder="Paste suspicious SMS or WhatsApp message here..."
     )
 
-    if st.button(
-        "🔍 Analyze Message",
-        key="message_button"
-    ):
-
+    if st.button("🔍 Analyze Message", key="message_button"):
         if message.strip():
-
-            result = analyze_text(
-                message
-            )
-
-            save_scan(
-                "Message",
-                message,
-                result["risk"],
-                result["score"]
-            )
-
-            complete_analysis(
-                "Message",
-                message,
-                result
-            )
-
+            result = analyze_text(message)
+            store_analysis("Message", message, result)
         else:
-
-            st.warning(
-                "Please enter a message."
-            )
+            st.warning("Please enter a message.")
 
 
 # =========================================================
@@ -530,7 +407,6 @@ if option == "📩 Message":
 # =========================================================
 
 elif option == "🌐 URL":
-
     st.header("🌐 URL Analyzer")
 
     url = st.text_input(
@@ -538,35 +414,12 @@ elif option == "🌐 URL":
         placeholder="https://example.com"
     )
 
-    if st.button(
-        "🔍 Analyze URL",
-        key="url_button"
-    ):
-
+    if st.button("🔍 Analyze URL", key="url_button"):
         if url.strip():
-
-            result = analyze_url(
-                url
-            )
-
-            save_scan(
-                "URL",
-                url,
-                result["risk"],
-                result["score"]
-            )
-
-            complete_analysis(
-                "URL",
-                url,
-                result
-            )
-
+            result = analyze_url(url)
+            store_analysis("URL", url, result)
         else:
-
-            st.warning(
-                "Please enter a URL."
-            )
+            st.warning("Please enter a URL.")
 
 
 # =========================================================
@@ -574,7 +427,6 @@ elif option == "🌐 URL":
 # =========================================================
 
 elif option == "📱 Phone Number":
-
     st.header("📱 Phone Number Analyzer")
 
     phone = st.text_input(
@@ -582,35 +434,12 @@ elif option == "📱 Phone Number":
         placeholder="Enter phone number"
     )
 
-    if st.button(
-        "🔍 Analyze Phone Number",
-        key="phone_button"
-    ):
-
+    if st.button("🔍 Analyze Phone Number", key="phone_button"):
         if phone.strip():
-
-            result = analyze_phone(
-                phone
-            )
-
-            save_scan(
-                "Phone Number",
-                phone,
-                result["risk"],
-                result["score"]
-            )
-
-            complete_analysis(
-                "Phone Number",
-                phone,
-                result
-            )
-
+            result = analyze_phone(phone)
+            store_analysis("Phone Number", phone, result)
         else:
-
-            st.warning(
-                "Please enter a phone number."
-            )
+            st.warning("Please enter a phone number.")
 
 
 # =========================================================
@@ -618,7 +447,6 @@ elif option == "📱 Phone Number":
 # =========================================================
 
 elif option == "📧 Email":
-
     st.header("📧 Email Analyzer")
 
     sender = st.text_input(
@@ -637,54 +465,23 @@ elif option == "📧 Email":
         placeholder="Paste the email content here..."
     )
 
-    if st.button(
-        "🔍 Analyze Email",
-        key="email_button"
-    ):
-
+    if st.button("🔍 Analyze Email", key="email_button"):
         if email_body.strip():
-
             combined_email = (
-                "Sender: "
-                + sender
-                + "\nSubject: "
-                + subject
-                + "\n\n"
-                + email_body
+                f"Sender: {sender}\n"
+                f"Subject: {subject}\n\n"
+                f"{email_body}"
             )
 
-            result = analyze_text(
-                combined_email
-            )
-
-            result["categories"].append(
+            result = analyze_text(combined_email)
+            result.setdefault("categories", []).append(
                 "Email Scam Analysis"
             )
+            result["categories"] = list(dict.fromkeys(result["categories"]))
 
-            result["categories"] = list(
-                dict.fromkeys(
-                    result["categories"]
-                )
-            )
-
-            save_scan(
-                "Email",
-                combined_email,
-                result["risk"],
-                result["score"]
-            )
-
-            complete_analysis(
-                "Email",
-                combined_email,
-                result
-            )
-
+            store_analysis("Email", combined_email, result)
         else:
-
-            st.warning(
-                "Please enter the email content."
-            )
+            st.warning("Please enter the email content.")
 
 
 # =========================================================
@@ -692,69 +489,32 @@ elif option == "📧 Email":
 # =========================================================
 
 elif option == "📸 Screenshot":
-
     st.header("📸 Screenshot Analyzer")
 
     uploaded_file = st.file_uploader(
         "Upload a screenshot:",
-        type=[
-            "png",
-            "jpg",
-            "jpeg"
-        ]
+        type=["png", "jpg", "jpeg"]
     )
 
     if uploaded_file:
-
         st.image(
             uploaded_file,
             caption="Uploaded Screenshot",
             use_container_width=True
         )
 
-        if st.button(
-            "🔍 Analyze Screenshot",
-            key="screenshot_button"
-        ):
+        if st.button("🔍 Analyze Screenshot", key="screenshot_button"):
+            try:
+                extracted_text = extract_text_from_image(uploaded_file)
 
-            extracted_text = extract_text_from_image(
-                uploaded_file
-            )
+                if extracted_text.strip():
+                    result = analyze_text(extracted_text)
+                    store_analysis("Screenshot", extracted_text, result)
+                else:
+                    st.warning("No readable text was detected.")
 
-            st.subheader(
-                "📝 Extracted Text"
-            )
-
-            st.text_area(
-                "OCR Result",
-                extracted_text,
-                height=200
-            )
-
-            if extracted_text.strip():
-
-                result = analyze_text(
-                    extracted_text
-                )
-
-                save_scan(
-                    "Screenshot",
-                    extracted_text,
-                    result["risk"],
-                    result["score"]
-                )
-
-                complete_analysis(
-                    "Screenshot",
-                    extracted_text,
-                    result
-                )
-
-            else:
-
-                st.warning(
-                    "No readable text was detected."
-                )
+            except Exception as error:
+                st.error(f"Screenshot analysis failed: {error}")
 
 
 # =========================================================
@@ -762,206 +522,80 @@ elif option == "📸 Screenshot":
 # =========================================================
 
 elif option == "📊 Dashboard":
-
     st.header("📊 FraudLens Dashboard")
 
-    records = get_scan_history()
+    try:
+        records = get_scan_history() or []
+    except Exception as error:
+        records = []
+        st.error(f"Could not load scan history: {error}")
 
     if records:
-
-        # ---------------------------------------------
-        # STATISTICS
-        # ---------------------------------------------
-
         total = len(records)
-
-        high = sum(
-            r["risk_level"] == "HIGH"
-            for r in records
-        )
-
-        medium = sum(
-            r["risk_level"] == "MEDIUM"
-            for r in records
-        )
-
-        low = sum(
-            r["risk_level"] == "LOW"
-            for r in records
-        )
-
-        unknown = sum(
-            r["risk_level"] == "UNKNOWN"
-            for r in records
-        )
+        high = sum(r["risk_level"] == "HIGH" for r in records)
+        medium = sum(r["risk_level"] == "MEDIUM" for r in records)
+        low = sum(r["risk_level"] == "LOW" for r in records)
+        unknown = sum(r["risk_level"] == "UNKNOWN" for r in records)
 
         c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Scans", total)
+        c2.metric("🔴 High Risk", high)
+        c3.metric("🟠 Medium Risk", medium)
+        c4.metric("🟢 Low Risk", low)
 
-        c1.metric(
-            "Total Scans",
-            total
-        )
+        st.subheader("📈 Risk Distribution")
+        st.bar_chart({
+            "High Risk": [high],
+            "Medium Risk": [medium],
+            "Low Risk": [low],
+            "Unknown": [unknown]
+        })
 
-        c2.metric(
-            "🔴 High Risk",
-            high
-        )
-
-        c3.metric(
-            "🟠 Medium Risk",
-            medium
-        )
-
-        c4.metric(
-            "🟢 Low Risk",
-            low
-        )
-
-        # ---------------------------------------------
-        # RISK CHART
-        # ---------------------------------------------
-
-        st.subheader(
-            "📈 Risk Distribution"
-        )
-
-        chart_data = {
-            "High Risk": high,
-            "Medium Risk": medium,
-            "Low Risk": low,
-            "Unknown": unknown
-        }
-
-        st.bar_chart(
-            chart_data
-        )
-
-        # ---------------------------------------------
-        # SCAN TYPE STATISTICS
-        # ---------------------------------------------
-
-        st.subheader(
-            "📊 Scan Type Statistics"
-        )
-
+        st.subheader("📊 Scan Type Statistics")
         scan_types = {}
-
         for record in records:
+            scan_type = record["scan_type"]
+            scan_types[scan_type] = scan_types.get(scan_type, 0) + 1
 
-            scan_type = record[
-                "scan_type"
-            ]
+        st.bar_chart({
+            "Number of Scans": scan_types
+        })
 
-            scan_types[scan_type] = (
-                scan_types.get(
-                    scan_type,
-                    0
-                ) + 1
-            )
-
-        st.bar_chart(
-            scan_types
-        )
-
-        # ---------------------------------------------
-        # SEARCH HISTORY
-        # ---------------------------------------------
-
-        st.subheader(
-            "🔎 Search Scan History"
-        )
-
+        st.subheader("🔎 Search Scan History")
         search = st.text_input(
-            "Search by scan type, risk level or input:"
+            "Search by scan type, risk level or input:",
+            key="history_search"
         )
 
         filtered_records = records
-
         if search.strip():
-
-            search_lower = search.lower()
-
+            query = search.lower()
             filtered_records = [
-                record
-                for record in records
-                if search_lower in str(
-                    record
-                ).lower()
+                record for record in records
+                if query in str(record).lower()
             ]
 
-        st.write(
-            f"Showing {len(filtered_records)} scan(s)"
-        )
-
-        # ---------------------------------------------
-        # HISTORY
-        # ---------------------------------------------
+        st.write(f"Showing {len(filtered_records)} scan(s)")
 
         for record in filtered_records:
+            with st.expander(
+                f"{record['scan_type']} | {record['risk_level']} | "
+                f"{record['risk_score']}/100"
+            ):
+                st.write("**Input:**")
+                st.text(record["input_data"])
+                st.write("**Scanned at:**", record["scanned_at"])
 
-            input_value = html.escape(
-                str(
-                    record["input_data"]
-                )
-            )
-
-            st.markdown(
-                f"""
-                <div class="result-box">
-
-                <b>Type:</b>
-                {html.escape(str(record["scan_type"]))}
-
-                <br><br>
-
-                <b>Risk:</b>
-                {html.escape(str(record["risk_level"]))}
-
-                <br>
-
-                <b>Score:</b>
-                {html.escape(str(record["risk_score"]))}/100
-
-                <br><br>
-
-                <b>Input:</b>
-                {input_value}
-
-                <br><br>
-
-                <b>Scanned At:</b>
-                {html.escape(str(record["scanned_at"]))}
-
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        # ---------------------------------------------
-        # EXPORT HISTORY
-        # ---------------------------------------------
-
-        st.subheader(
-            "📥 Export Scan History"
-        )
+        st.subheader("📥 Export Scan History")
 
         output = io.StringIO()
-
-        writer = csv.writer(
-            output
-        )
-
+        writer = csv.writer(output)
         writer.writerow([
-            "ID",
-            "Scan Type",
-            "Input",
-            "Risk Level",
-            "Risk Score",
-            "Scanned At"
+            "ID", "Scan Type", "Input",
+            "Risk Level", "Risk Score", "Scanned At"
         ])
 
         for record in records:
-
             writer.writerow([
                 record["id"],
                 record["scan_type"],
@@ -975,11 +609,30 @@ elif option == "📊 Dashboard":
             label="📥 Download Scan History CSV",
             data=output.getvalue(),
             file_name="FraudLens_Scan_History.csv",
-            mime="text/csv"
+            mime="text/csv",
+            key="download_history_csv"
         )
 
     else:
+        st.info("No scan history available yet. Analyze some content first.")
 
-        st.info(
-            "No scan history available yet."
-        )
+
+# =========================================================
+# PERSISTENT LATEST RESULT
+# =========================================================
+
+# Keep results visible across Streamlit reruns on the same analyzer.
+# The dashboard has its own separate display.
+if option != "📊 Dashboard":
+    latest = st.session_state.latest_analysis
+
+    expected_types = {
+        "📩 Message": "Message",
+        "🌐 URL": "URL",
+        "📱 Phone Number": "Phone Number",
+        "📧 Email": "Email",
+        "📸 Screenshot": "Screenshot"
+    }
+
+    if latest and latest["scan_type"] == expected_types.get(option):
+        show_latest_analysis()
